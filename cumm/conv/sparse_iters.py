@@ -304,16 +304,7 @@ class ForwardDgradSparseIOIterator(bases.ConvInputIterator):
                     # indices_[{s * self.sub_tile_shape[0] + ss}] = pred{s}_{ss} ? params_.mask_argsort_ptr_[{(s * self.tmap.delta[0] + ss)}] : 0;
 
                     # """)
-            code.raw(f"""
-            TV_PRAGMA_UNROLL
-            for (int s = 0; s < {self.tmap.iterations[0]}; ++s){{
-                TV_PRAGMA_UNROLL
-                for (int ss = 0; ss < {self.sub_tile_shape[0]}; ++ss){{
-                    indices_[s * {self.sub_tile_shape[0]} + ss] = indices_[s * {self.sub_tile_shape[0]} + ss] * 
-                            problem_.K * {self.dtype.nbytes_str()} ;
-                }}
-            }}
-            """)
+            # indices_ stores row IDs; byte scaling is deferred to get_indice_offset.
         else:
             code.raw(
                 f"int mask_inds[{self.tmap.iterations[0] * self.sub_tile_shape[0]}];"
@@ -348,8 +339,7 @@ class ForwardDgradSparseIOIterator(bases.ConvInputIterator):
                 for (int ss = 0; ss < {self.sub_tile_shape[0]}; ++ss){{
                     if (mask_[0] & (1u << (s * {self.sub_tile_shape[0] * self.tmap.iterations[1]} + ss))){{
                         indices_[s * {self.sub_tile_shape[0]} + ss] = 
-                        indice_ptr_[mask_inds[s * {self.sub_tile_shape[0]} + ss]] * 
-                            problem_.{C_or_K} * {self.dtype.nbytes_str()} ;
+                        indice_ptr_[mask_inds[s * {self.sub_tile_shape[0]} + ss]];
                     }}
                 }}
             }}
@@ -589,15 +579,18 @@ class ForwardDgradSparseIOIterator(bases.ConvInputIterator):
     def get_indice_offset(self):
         code = FunctionCode()
         code.arg("stride, contig, ss", f"int")
+        channel = "C" if self.op_type == ConvOpType.kForward or self.is_wgrad_input else "K"
         code.raw(f"""
-        return indices_[stride * {self.sub_tile_shape[0]} + ss];
+        // Cast before multiplication: row IDs remain int32, feature addresses do not.
+        return int64_t(indices_[stride * {self.sub_tile_shape[0]} + ss]) *
+            int64_t(problem_.{channel}) * {self.dtype.nbytes_str()};
         """)
-        return code.ret(f"int")
+        return code.ret("int64_t")
 
     @pccm.cuda.member_function(device=True, forceinline=True, const=True)
     def get(self):
         code = FunctionCode()
-        code.arg("indice_offset", f"int")
+        code.arg("indice_offset", "int64_t")
         code.raw(f"""
         return reinterpret_cast<{self.const_access_pointer}>( pointer_ + indice_offset);
         """)
@@ -893,16 +886,7 @@ class ForwardDgradSparseIOIteratorV2Mask(bases.ConvInputIterator):
                                 mask_arg_ptr +
                                 (s * self.tmap.delta[0] + ss) * 4,
                                 mask_ptr[s * self.sub_tile_shape[0] + ss])
-            code.raw(f"""
-            TV_PRAGMA_UNROLL
-            for (int s = 0; s < {self.tmap.iterations[0]}; ++s){{
-                TV_PRAGMA_UNROLL
-                for (int ss = 0; ss < {self.sub_tile_shape[0]}; ++ss){{
-                    indices_[s * {self.sub_tile_shape[0]} + ss] = indices_[s * {self.sub_tile_shape[0]} + ss] * 
-                            problem_.K * {self.dtype.nbytes_str()} ;
-                }}
-            }}
-            """)
+            # indices_ stores row IDs; byte scaling is deferred to get_indice_offset.
         else:
             code.raw(
                 f"int mask_inds[{self.tmap.iterations[0] * self.sub_tile_shape[0]}];"
@@ -934,8 +918,7 @@ class ForwardDgradSparseIOIteratorV2Mask(bases.ConvInputIterator):
                     // if (mask_[0] & (1u << (s * {self.sub_tile_shape[0]} + ss)))
                     if (mask_.query_coord(s, 0, ss, 0)){{
                         indices_[s * {self.sub_tile_shape[0]} + ss] = 
-                        indice_ptr_[mask_inds[s * {self.sub_tile_shape[0]} + ss]] * 
-                            problem_.{C_or_K} * {self.dtype.nbytes_str()} ;
+                        indice_ptr_[mask_inds[s * {self.sub_tile_shape[0]} + ss]];
                     }}
                 }}
             }}
@@ -1119,15 +1102,18 @@ class ForwardDgradSparseIOIteratorV2Mask(bases.ConvInputIterator):
     def get_indice_offset(self):
         code = FunctionCode()
         code.arg("stride, contig, ss", f"int")
+        channel = "C" if self.op_type == ConvOpType.kForward or self.is_wgrad_input else "K"
         code.raw(f"""
-        return indices_[stride * {self.sub_tile_shape[0]} + ss];
+        // Cast before multiplication: row IDs remain int32, feature addresses do not.
+        return int64_t(indices_[stride * {self.sub_tile_shape[0]} + ss]) *
+            int64_t(problem_.{channel}) * {self.dtype.nbytes_str()};
         """)
-        return code.ret(f"int")
+        return code.ret("int64_t")
 
     @pccm.cuda.member_function(device=True, forceinline=True, const=True)
     def get(self):
         code = FunctionCode()
-        code.arg("indice_offset", f"int")
+        code.arg("indice_offset", "int64_t")
         code.raw(f"""
         return reinterpret_cast<{self.const_access_pointer}>( pointer_ + indice_offset);
         """)
